@@ -6,13 +6,15 @@ ARG GLIB_MINOR_VERSION=2.75
 ARG GLIB_VERSION=${GLIB_MINOR_VERSION}.0
 ARG PIXMAN_VERSION=0.42.2
 ARG FFI_VERSION=adbcf2b247696dde2667ab552cb93e0c79455c84
+ARG QEMU_VERSION=v8.1.0 # Specify the QEMU version you are using
 
 FROM emscripten/emsdk:$EMSDK_VERSION_QEMU AS build-base
 # Porting glib to emscripten inspired by https://github.com/emscripten-core/emscripten/issues/11066
 ENV TARGET=/build/target
-ENV CFLAGS="-O2 -matomics -mbulk-memory -DNDEBUG -sWASM_BIGINT -DWASM_BIGINT -pthread -sMALLOC=mimalloc  -sASYNCIFY=1 "
+# Injected SDL flags directly into compiler flags so all down-level build targets can resolve them
+ENV CFLAGS="-O2 -matomics -mbulk-memory -DNDEBUG -sWASM_BIGINT -DWASM_BIGINT -pthread -sMALLOC=mimalloc -sASYNCIFY=1 -sUSE_SDL=2"
 ENV CXXFLAGS="$CFLAGS"
-ENV LDFLAGS="-L$TARGET/lib -O2"
+ENV LDFLAGS="-L$TARGET/lib -O2 -sUSE_SDL=2"
 ENV CPATH="$TARGET/include"
 ENV PKG_CONFIG_PATH="$TARGET/lib/pkgconfig"
 ENV EM_PKG_CONFIG_PATH="$PKG_CONFIG_PATH"
@@ -78,7 +80,7 @@ COPY --link --from=zlib-emscripten-dev /build/ /build/
 COPY --link --from=libffi-emscripten-dev /build/ /build/
 
 WORKDIR /glib
-ENV CFLAGS="-Wno-error=incompatible-function-pointer-types -Wincompatible-function-pointer-types -O2 -matomics -mbulk-memory -DNDEBUG -pthread -sWASM_BIGINT -sMALLOC=mimalloc -sASYNCIFY=1"
+ENV CFLAGS="-Wno-error=incompatible-function-pointer-types -Wincompatible-function-pointer-types -O2 -matomics -mbulk-memory -DNDEBUG -pthread -sWASM_BIGINT -sMALLOC=mimalloc -sASYNCIFY=1 -sUSE_SDL=2"
 ENV CXXFLAGS="$CFLAGS"
 RUN <<EOF
 cat <<'EOT' > /emcc-meson-wrap.sh
@@ -135,10 +137,36 @@ RUN emmake make -j$(nproc)
 RUN emmake make install
 RUN rm /build/target/lib/libpixman-1.so /build/target/lib/libpixman-1.so.0 /build/target/lib/libpixman-1.so.$PIXMAN_VERSION
 
+# --- NEW: Build QEMU Wasm Layer with SDL enabled ---
+FROM build-base AS qemu-emscripten-dev
+ARG QEMU_VERSION
+COPY --link --from=zlib-emscripten-dev /build/ /build/
+COPY --link --from=build-dev /build/ /build/
+COPY --link --from=pixman-emscripten-dev /build/ /build/
+
+RUN git clone https://github.com /qemu
+WORKDIR /qemu
+# If you target a specific branch or version, adjust the checkout below
+# RUN git checkout $QEMU_VERSION
+
+# Explicitly swap '--disable-sdl' for '--enable-sdl' inside the configure setup
+RUN emconfigure ./configure \
+    --target-list=x86_64-softmmu \
+    --prefix=$TARGET \
+    --enable-sdl \
+    --disable-vnc \
+    --disable-gfx \
+    --static
+
+RUN emmake make -j$(nproc)
+RUN emmake make install
+
+# --- Final Production Image Environment ---
 FROM build-base
 COPY --link --from=zlib-emscripten-dev /build/ /build/
 COPY --link --from=build-dev /build/ /build/
 COPY --link --from=pixman-emscripten-dev /build/ /build/
+COPY --link --from=qemu-emscripten-dev /build/ /build/
 WORKDIR /build/
 RUN npm i xterm-pty@v0.10.1
 CMD sleep infinity
